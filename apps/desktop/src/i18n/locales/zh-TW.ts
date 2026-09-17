@@ -3206,6 +3206,8 @@ export default withEnglishFallback({
     noDatabasesFound: "未找到資料庫",
   },
   contextMenu: {
+    compileObjectFailedTitle: "檢視編譯失敗",
+    compileObjectFailedMessage: "檢視「{name}」編譯失敗：\n{message}",
     openConnection: "開啟連線",
     closeConnection: "關閉連線",
     closeSelectedConnections: "關閉選取的 {count} 個連線",
@@ -3740,6 +3742,8 @@ export default withEnglishFallback({
     buckets: "Buckets",
   },
   objects: {
+    validStatus: "VALID",
+    invalidStatus: "INVALID",
     all: "全部",
     tables: "資料表",
     collections: "集合",

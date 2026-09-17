@@ -3207,6 +3207,8 @@ export default withEnglishFallback({
     maxRetriesHint: "Riprova automaticamente in caso di limitazione, timeout o errore di rete temporaneo. 0 = nessun tentativo, massimo 10.",
   },
   contextMenu: {
+    compileObjectFailedTitle: "Compilazione della vista non riuscita",
+    compileObjectFailedMessage: 'Compilazione della vista "{name}" non riuscita:\n{message}',
     openConnection: "Apri Connessione",
     closeConnection: "Chiudi Connessione",
     closeSelectedConnections: "Chiudi {count} connessioni selezionate",
@@ -3993,6 +3995,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "I privilegi di tipo ANY sono disabilitati da DM8 (ENABLE_DDL_ANY_PRIV=0) e non possono essere concessi o revocati",
   },
   objects: {
+    validStatus: "VALID",
+    invalidStatus: "INVALID",
     all: "Tutti",
     tables: "Tabelle",
     collections: "Collezioni",
