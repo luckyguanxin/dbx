@@ -67,6 +67,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
+    private static final int VIEW_VALIDITY_BATCH_SIZE = 500;
     private static final Pattern DATABASE_VERSION_MAJOR_PATTERN = Pattern.compile("(\\d+)\\.");
     // Word-boundary match so a type or default merely containing the letters is not mistaken
     // for the IDENTITY keyword.
@@ -1095,6 +1096,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
+        applyViewValidity(objects, schema);
+        return objects;
+    }
+
+    private List<ObjectInfo> queryConstrainedObjectsWithoutValidity(String schema, MetadataListConstraints constraints) {
         if (legacyJdbcMetadata) {
             return executeJdbcMetadataObjects(schema, constraints);
         }
@@ -1162,7 +1169,6 @@ public final class DamengAgent extends AbstractJdbcAgent {
         for (TableInfo table : executeJdbcMetadataTables(schema, constraints)) {
             objects.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
         }
-        applyViewValidity(objects, schema);
         return objects;
     }
 
@@ -1186,20 +1192,19 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
-            List<ObjectInfo> filtered = constraints.withoutPaging().filterObjects(result);
-            applyViewValidity(filtered, schema);
-            return filtered;
+            return constraints.withoutPaging().filterObjects(result);
         });
     }
 
     private void applyViewValidity(List<ObjectInfo> objects, String schema) {
-        if (objects.stream().noneMatch(object -> "VIEW".equals(object.getObject_type()))) {
-            return;
-        }
-        Map<String, Boolean> validityByName = loadViewValidity(schema);
+        List<String> viewNames = objects.stream()
+            .filter(object -> "VIEW".equals(object.getObject_type()))
+            .map(ObjectInfo::getName)
+            .toList();
+        Map<String, Boolean> validityByName = loadViewValidity(schema, viewNames);
         for (ObjectInfo object : objects) {
             if ("VIEW".equals(object.getObject_type())) {
-                object.setValid(validityByName.get(object.getName().toUpperCase(Locale.ROOT)));
+                object.setValid(validityByName.get(object.getName()));
             }
         }
     }
@@ -1210,49 +1215,58 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private void applyTableViewValidity(List<TableInfo> tables, String schema) {
-        if (tables.stream().noneMatch(table -> "VIEW".equals(table.getTable_type()))) {
-            return;
-        }
-        Map<String, Boolean> validityByName = loadViewValidity(schema);
+        List<String> viewNames = tables.stream()
+            .filter(table -> "VIEW".equals(table.getTable_type()))
+            .map(TableInfo::getName)
+            .toList();
+        Map<String, Boolean> validityByName = loadViewValidity(schema, viewNames);
         for (TableInfo table : tables) {
             if ("VIEW".equals(table.getTable_type())) {
-                table.setValid(validityByName.get(table.getName().toUpperCase(Locale.ROOT)));
+                table.setValid(validityByName.get(table.getName()));
             }
         }
     }
 
-    private Map<String, Boolean> loadViewValidity(String schema) {
+    private Map<String, Boolean> loadViewValidity(String schema, List<String> viewNames) {
         Map<String, Boolean> validityByName = new HashMap<>();
-        try {
-            unchecked(() -> {
-                try (PreparedStatement stmt = requireConnected().prepareStatement(
-                    "SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS "
-                        + "FROM DBA_OBJECTS "
-                        + "WHERE OBJECT_TYPE = 'VIEW' AND OWNER = ?"
-                )) {
-                    stmt.setString(1, schema);
-                    try (ResultSet rs = stmt.executeQuery()) {
-                        while (rs.next()) {
-                            String name = rs.getString("OBJECT_NAME");
-                            String status = rs.getString("STATUS");
-                            if (name == null || status == null) {
-                                continue;
-                            }
-                            Boolean valid = switch (status.trim().toUpperCase(Locale.ROOT)) {
-                                case "VALID" -> Boolean.TRUE;
-                                case "INVALID" -> Boolean.FALSE;
-                                default -> null;
-                            };
-                            if (valid != null) {
-                                validityByName.put(name.toUpperCase(Locale.ROOT), valid);
+        List<String> names = new ArrayList<>(new LinkedHashSet<>(viewNames));
+        for (int offset = 0; offset < names.size(); offset += VIEW_VALIDITY_BATCH_SIZE) {
+            List<String> batch = names.subList(offset, Math.min(offset + VIEW_VALIDITY_BATCH_SIZE, names.size()));
+            try {
+                unchecked(() -> {
+                    try (PreparedStatement stmt = requireConnected().prepareStatement(
+                        "SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS "
+                            + "FROM DBA_OBJECTS "
+                            + "WHERE OBJECT_TYPE = 'VIEW' AND OWNER = ? AND OBJECT_NAME IN ("
+                            + String.join(", ", Collections.nCopies(batch.size(), "?")) + ")"
+                    )) {
+                        stmt.setString(1, schema);
+                        for (int index = 0; index < batch.size(); index++) {
+                            stmt.setString(index + 2, batch.get(index));
+                        }
+                        try (ResultSet rs = stmt.executeQuery()) {
+                            while (rs.next()) {
+                                String name = rs.getString("OBJECT_NAME");
+                                String status = rs.getString("STATUS");
+                                if (name == null || status == null) {
+                                    continue;
+                                }
+                                Boolean valid = switch (status.trim().toUpperCase(Locale.ROOT)) {
+                                    case "VALID" -> Boolean.TRUE;
+                                    case "INVALID" -> Boolean.FALSE;
+                                    default -> null;
+                                };
+                                if (valid != null) {
+                                    validityByName.put(name, valid);
+                                }
                             }
                         }
                     }
-                }
-                return null;
-            });
-        } catch (RuntimeException error) {
-            LOGGER.log(Level.FINE, "Unable to load Dameng view validity for schema " + schema, error);
+                    return null;
+                });
+            } catch (RuntimeException error) {
+                LOGGER.log(Level.FINE, "Unable to load Dameng view validity for schema " + schema, error);
+            }
         }
         return validityByName;
     }
