@@ -2631,7 +2631,7 @@ async function compileDamengView() {
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     if (!executed) return;
     toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
-    await connectionStore.refreshTreeNode(node);
+    await connectionStore.refreshObjectListTreeNode(node.connectionId, node.database, node.schema);
   } catch (e: any) {
     compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
     compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: node.label, message: e?.message || String(e) });
