@@ -244,8 +244,10 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals(List.of("MV_C", "TABLE_A", "VIEW_B"), tables.stream().map(TableInfo::getName).toList());
         Assertions.assertEquals(List.of("MATERIALIZED_VIEW", "TABLE", "VIEW"), tables.stream().map(TableInfo::getTable_type).toList());
         Assertions.assertEquals(List.of("mv comment", "table comment", "view comment"), tables.stream().map(TableInfo::getComment).toList());
-        Assertions.assertEquals(4, sqls.size(), String.join("\n", sqls));
-        Assertions.assertTrue(sqls.stream().allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
+        Assertions.assertEquals(5, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream()
+            .filter(sql -> !sql.contains("FROM DBA_OBJECTS"))
+            .allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
         Assertions.assertEquals(List.of("catalog=null,schema=APP\\_DATA\\%2026,table=%,types=null"), jdbcMetadataCalls);
     }
 
@@ -371,6 +373,55 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void mapsDamengViewValidityThroughPagedListTablesResults() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> validityParams = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityConnection(
+            sqls,
+            validityParams,
+            List.of(
+                List.of("APP", "VALID_VIEW", "VIEW", "VALID"),
+                List.of("APP", "INVALID_VIEW", "VIEW", "INVALID")
+            ),
+            null,
+            List.of(List.of("INVALID_VIEW", "VIEW", "invalid view"))
+        ));
+
+        List<TableInfo> tables = agent.listTables("APP", new MetadataListConstraints(null, 1, 1, List.of("VIEW")));
+
+        Assertions.assertEquals(1, tables.size());
+        Assertions.assertEquals("INVALID_VIEW", tables.get(0).getName());
+        Assertions.assertEquals(Boolean.FALSE, tables.get(0).getValid());
+        Assertions.assertEquals(List.of("APP"), validityParams);
+    }
+
+    @Test
+    void mapsDamengViewValidityThroughJdbcListTablesFallback() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> validityParams = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityJdbcFallbackConnection(
+            sqls,
+            validityParams,
+            List.of(List.of("APP", "VIEW_B", "VIEW", "INVALID"))
+        ));
+        setLegacyJdbcMetadata(agent, true);
+
+        List<TableInfo> tables = agent.listTables("APP");
+
+        Assertions.assertEquals(List.of("TABLE_A", "VIEW_B"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(Boolean.FALSE, tables.stream()
+            .filter(table -> "VIEW_B".equals(table.getName()))
+            .findFirst().orElseThrow().getValid());
+        Assertions.assertNull(tables.stream()
+            .filter(table -> "TABLE_A".equals(table.getName()))
+            .findFirst().orElseThrow().getValid());
+        Assertions.assertEquals(List.of("APP"), validityParams);
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM DBA_OBJECTS")), sqls.toString());
+    }
+
+    @Test
     void doesNotQueryOrAttachValidityToNonViewObjects() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
@@ -446,8 +497,10 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals(List.of("MATERIALIZED_VIEW", "TABLE", "VIEW"), objects.stream().map(ObjectInfo::getObject_type).toList());
         Assertions.assertEquals(List.of("APP_DATA%2026", "APP_DATA%2026", "APP_DATA%2026"), objects.stream().map(ObjectInfo::getSchema).toList());
         Assertions.assertEquals(List.of("mv comment", "table comment", "view comment"), objects.stream().map(ObjectInfo::getComment).toList());
-        Assertions.assertEquals(4, sqls.size(), String.join("\n", sqls));
-        Assertions.assertTrue(sqls.stream().allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
+        Assertions.assertEquals(5, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream()
+            .filter(sql -> !sql.contains("FROM DBA_OBJECTS"))
+            .allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
         Assertions.assertEquals(List.of("catalog=null,schema=APP\\_DATA\\%2026,table=%,types=null"), jdbcMetadataCalls);
     }
 
@@ -1610,6 +1663,25 @@ class DamengAgentMetadataTest {
         List<List<Object>> validityRows,
         SQLException validityError
     ) {
+        return viewValidityConnection(
+            sqls,
+            validityParams,
+            validityRows,
+            validityError,
+            List.of(
+                List.of("VALID_VIEW", "VIEW", "valid view"),
+                List.of("INVALID_VIEW", "VIEW", "invalid view")
+            )
+        );
+    }
+
+    private static Connection viewValidityConnection(
+        List<String> sqls,
+        List<String> validityParams,
+        List<List<Object>> validityRows,
+        SQLException validityError,
+        List<List<Object>> tableRows
+    ) {
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
             if ("prepareStatement".equals(name)) {
@@ -1620,12 +1692,44 @@ class DamengAgentMetadataTest {
                     return statusMetadataStatement(validityRows, validityParams);
                 }
                 if (sql.contains("FROM ALL_OBJECTS o")) {
-                    return metadataStatement(List.of(
-                        List.of("VALID_VIEW", "VIEW", "valid view"),
-                        List.of("INVALID_VIEW", "VIEW", "invalid view")
-                    ));
+                    return metadataStatement(tableRows);
                 }
                 return metadataStatement(List.of());
+            }
+            if ("close".equals(name)) return null;
+            if ("isClosed".equals(name)) return false;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection viewValidityJdbcFallbackConnection(
+        List<String> sqls,
+        List<String> validityParams,
+        List<List<Object>> validityRows
+    ) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("FROM DBA_OBJECTS")) {
+                    return statusMetadataStatement(validityRows, validityParams);
+                }
+                return failingMetadataStatement(new SQLException("no ALL_OBJECTS privilege"));
+            }
+            if ("getMetaData".equals(name)) {
+                return proxy(DatabaseMetaData.class, (metadataMethod, metadataArgs) -> {
+                    if ("getSearchStringEscape".equals(metadataMethod.getName())) {
+                        return "\\";
+                    }
+                    if ("getTables".equals(metadataMethod.getName())) {
+                        return metadataResultSet(List.of(
+                            List.of("VIEW_B", "VIEW", "view comment"),
+                            List.of("TABLE_A", "TABLE", "table comment")
+                        ));
+                    }
+                    return defaultValue(metadataMethod.getReturnType());
+                });
             }
             if ("close".equals(name)) return null;
             if ("isClosed".equals(name)) return false;

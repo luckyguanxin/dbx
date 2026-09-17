@@ -570,17 +570,17 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
         if (legacyJdbcMetadata) {
-            return executeJdbcMetadataTables(schema, constraints);
+            return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         }
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
         RuntimeException permissionError;
         try {
-            return executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints);
+            return withViewValidity(executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints), schema);
         } catch (RuntimeException e) {
             if (isDamengInvalidDatetimeMetadataError(e)) {
-                return executeJdbcMetadataTables(schema, constraints);
+                return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
             }
             if (!isDamengMetadataPermissionError(e)) {
                 throw e;
@@ -589,13 +589,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (needsMaterializedViewClassification(constraints)) {
             try {
-                return executeConstrainedTables(
+                return withViewValidity(executeConstrainedTables(
                     buildAccessibleConstrainedTablesQuery(schema, constraints),
                     constraints
-                );
+                ), schema);
             } catch (RuntimeException e) {
                 if (isDamengInvalidDatetimeMetadataError(e)) {
-                    return executeJdbcMetadataTables(schema, constraints);
+                    return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
                 }
                 if (!isDamengMetadataPermissionError(e)) {
                     throw e;
@@ -605,13 +605,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
             try {
-                return executeConstrainedTables(
+                return withViewValidity(executeConstrainedTables(
                     buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
                     constraints
-                );
+                ), schema);
             } catch (RuntimeException e) {
                 if (isDamengInvalidDatetimeMetadataError(e)) {
-                    return executeJdbcMetadataTables(schema, constraints);
+                    return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
                 }
                 if (!isDamengMetadataPermissionError(e)) {
                     throw e;
@@ -620,10 +620,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         try {
-            return executeRawConstrainedTables(schema, constraints);
+            return withViewValidity(executeRawConstrainedTables(schema, constraints), schema);
         } catch (RuntimeException e) {
             if (isDamengInvalidDatetimeMetadataError(e)) {
-                return executeJdbcMetadataTables(schema, constraints);
+                return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
             }
             if (!isDamengMetadataPermissionError(e)) {
                 throw e;
@@ -631,7 +631,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             permissionError.addSuppressed(e);
         }
         try {
-            return executeJdbcMetadataTables(schema, constraints);
+            return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         } catch (RuntimeException e) {
             e.addSuppressed(permissionError);
             throw e;
@@ -1160,7 +1160,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         List<ObjectInfo> objects = new ArrayList<>();
         for (TableInfo table : executeJdbcMetadataTables(schema, constraints)) {
-            objects.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+            objects.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
         }
         applyViewValidity(objects, schema);
         return objects;
@@ -1196,6 +1196,32 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (objects.stream().noneMatch(object -> "VIEW".equals(object.getObject_type()))) {
             return;
         }
+        Map<String, Boolean> validityByName = loadViewValidity(schema);
+        for (ObjectInfo object : objects) {
+            if ("VIEW".equals(object.getObject_type())) {
+                object.setValid(validityByName.get(object.getName().toUpperCase(Locale.ROOT)));
+            }
+        }
+    }
+
+    private List<TableInfo> withViewValidity(List<TableInfo> tables, String schema) {
+        applyTableViewValidity(tables, schema);
+        return tables;
+    }
+
+    private void applyTableViewValidity(List<TableInfo> tables, String schema) {
+        if (tables.stream().noneMatch(table -> "VIEW".equals(table.getTable_type()))) {
+            return;
+        }
+        Map<String, Boolean> validityByName = loadViewValidity(schema);
+        for (TableInfo table : tables) {
+            if ("VIEW".equals(table.getTable_type())) {
+                table.setValid(validityByName.get(table.getName().toUpperCase(Locale.ROOT)));
+            }
+        }
+    }
+
+    private Map<String, Boolean> loadViewValidity(String schema) {
         Map<String, Boolean> validityByName = new HashMap<>();
         try {
             unchecked(() -> {
@@ -1227,13 +1253,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
             });
         } catch (RuntimeException error) {
             LOGGER.log(Level.FINE, "Unable to load Dameng view validity for schema " + schema, error);
-            return;
         }
-        for (ObjectInfo object : objects) {
-            if ("VIEW".equals(object.getObject_type())) {
-                object.setValid(validityByName.get(object.getName().toUpperCase(Locale.ROOT)));
-            }
-        }
+        return validityByName;
     }
 
     private List<ObjectInfo> executeRawConstrainedObjects(String schema, MetadataListConstraints constraints) {

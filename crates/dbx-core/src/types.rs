@@ -106,6 +106,8 @@ impl CatalogInfo {
 pub struct TableInfo {
     pub name: String,
     pub table_type: String, // "TABLE" or "VIEW"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
     pub comment: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,

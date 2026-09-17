@@ -10382,6 +10382,7 @@ mod tests {
         db::TableInfo {
             name: name.to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

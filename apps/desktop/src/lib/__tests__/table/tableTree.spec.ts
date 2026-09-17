@@ -52,16 +52,24 @@ describe("case-sensitive database objects", () => {
   });
 
   it("preserves view validity when building the table-like tree path", () => {
+    const tables: TableInfo[] = [
+      { name: "VALID_VIEW", table_type: "VIEW", valid: true },
+      { name: "INVALID_VIEW", table_type: "VIEW", valid: false },
+    ];
     const nodes = buildTableTreeNodes({
       ...context,
       schema: "dbx_test",
-      tables: [
-        { name: "VALID_VIEW", table_type: "VIEW", valid: true },
-        { name: "INVALID_VIEW", table_type: "VIEW", valid: false },
-      ],
+      tables,
     });
 
     expect(nodes.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      objects: mergeTableInfosIntoObjects([], tables, "dbx_test"),
+    });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
   });
 
   it("keeps table nodes whose names differ only by case across pages", () => {
