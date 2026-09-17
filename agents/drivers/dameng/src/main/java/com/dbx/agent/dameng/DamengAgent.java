@@ -1158,9 +1158,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
-        return executeJdbcMetadataTables(schema, constraints).stream()
-            .map(table -> new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()))
-            .toList();
+        List<ObjectInfo> objects = new ArrayList<>();
+        for (TableInfo table : executeJdbcMetadataTables(schema, constraints)) {
+            objects.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+        }
+        applyViewValidity(objects, schema);
+        return objects;
     }
 
     private List<ObjectInfo> executeConstrainedObjects(
@@ -1183,8 +1186,54 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
-            return constraints.withoutPaging().filterObjects(result);
+            List<ObjectInfo> filtered = constraints.withoutPaging().filterObjects(result);
+            applyViewValidity(filtered, schema);
+            return filtered;
         });
+    }
+
+    private void applyViewValidity(List<ObjectInfo> objects, String schema) {
+        if (objects.stream().noneMatch(object -> "VIEW".equals(object.getObject_type()))) {
+            return;
+        }
+        Map<String, Boolean> validityByName = new HashMap<>();
+        try {
+            unchecked(() -> {
+                try (PreparedStatement stmt = requireConnected().prepareStatement(
+                    "SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS "
+                        + "FROM DBA_OBJECTS "
+                        + "WHERE OBJECT_TYPE = 'VIEW' AND OWNER = ?"
+                )) {
+                    stmt.setString(1, schema);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            String name = rs.getString("OBJECT_NAME");
+                            String status = rs.getString("STATUS");
+                            if (name == null || status == null) {
+                                continue;
+                            }
+                            Boolean valid = switch (status.trim().toUpperCase(Locale.ROOT)) {
+                                case "VALID" -> Boolean.TRUE;
+                                case "INVALID" -> Boolean.FALSE;
+                                default -> null;
+                            };
+                            if (valid != null) {
+                                validityByName.put(name.toUpperCase(Locale.ROOT), valid);
+                            }
+                        }
+                    }
+                }
+                return null;
+            });
+        } catch (RuntimeException error) {
+            LOGGER.log(Level.FINE, "Unable to load Dameng view validity for schema " + schema, error);
+            return;
+        }
+        for (ObjectInfo object : objects) {
+            if ("VIEW".equals(object.getObject_type())) {
+                object.setValid(validityByName.get(object.getName().toUpperCase(Locale.ROOT)));
+            }
+        }
     }
 
     private List<ObjectInfo> executeRawConstrainedObjects(String schema, MetadataListConstraints constraints) {

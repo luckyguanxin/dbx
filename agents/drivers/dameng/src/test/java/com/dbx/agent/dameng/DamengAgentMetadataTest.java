@@ -338,6 +338,69 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void mapsDamengViewValidityFromDbaObjectsAndBindsSchema() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> validityParams = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityConnection(
+            sqls,
+            validityParams,
+            List.of(
+                List.of("APP", "VALID_VIEW", "VIEW", "VALID"),
+                List.of("APP", "INVALID_VIEW", "VIEW", "INVALID")
+            ),
+            null
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertEquals(Boolean.TRUE, objects.stream()
+            .filter(object -> "VALID_VIEW".equals(object.getName()))
+            .findFirst().orElseThrow().getValid());
+        Assertions.assertEquals(Boolean.FALSE, objects.stream()
+            .filter(object -> "INVALID_VIEW".equals(object.getName()))
+            .findFirst().orElseThrow().getValid());
+        String validitySql = sqls.stream()
+            .filter(sql -> sql.contains("FROM DBA_OBJECTS"))
+            .findFirst()
+            .orElseThrow();
+        Assertions.assertTrue(validitySql.contains("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS"), validitySql);
+        Assertions.assertTrue(validitySql.contains("OBJECT_TYPE = 'VIEW'"), validitySql);
+        Assertions.assertTrue(validitySql.contains("OWNER = ?"), validitySql);
+        Assertions.assertEquals(List.of("APP"), validityParams);
+    }
+
+    @Test
+    void doesNotQueryOrAttachValidityToNonViewObjects() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection("id comment", null, true, List.of(), sqls));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertTrue(objects.stream().allMatch(object -> object.getValid() == null), objects.toString());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("FROM DBA_OBJECTS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void keepsViewObjectsWithUnknownValidityWhenStatusQueryFails() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityConnection(
+            sqls,
+            new ArrayList<>(),
+            List.of(),
+            new SQLException("DBA_OBJECTS permission denied")
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertEquals(2, objects.size());
+        Assertions.assertTrue(objects.stream().allMatch(object -> object.getValid() == null), objects.toString());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM DBA_OBJECTS")), String.join("\n", sqls));
+    }
+
+    @Test
     void queriesSequencesAndPackagesWhenRequested() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
@@ -1539,6 +1602,72 @@ class DamengAgentMetadataTest {
 
     private static Connection metadataConnection(String allColumnComment, String fallbackColumnComment, boolean includeMaterializedView) {
         return metadataConnection(allColumnComment, fallbackColumnComment, includeMaterializedView, List.of(), null);
+    }
+
+    private static Connection viewValidityConnection(
+        List<String> sqls,
+        List<String> validityParams,
+        List<List<Object>> validityRows,
+        SQLException validityError
+    ) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("FROM DBA_OBJECTS")) {
+                    if (validityError != null) return failingMetadataStatement(validityError);
+                    return statusMetadataStatement(validityRows, validityParams);
+                }
+                if (sql.contains("FROM ALL_OBJECTS o")) {
+                    return metadataStatement(List.of(
+                        List.of("VALID_VIEW", "VIEW", "valid view"),
+                        List.of("INVALID_VIEW", "VIEW", "invalid view")
+                    ));
+                }
+                return metadataStatement(List.of());
+            }
+            if ("close".equals(name)) return null;
+            if ("isClosed".equals(name)) return false;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement statusMetadataStatement(List<List<Object>> rows, List<String> params) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            String name = method.getName();
+            if ("setString".equals(name)) {
+                params.add(String.valueOf(args[1]));
+                return null;
+            }
+            if ("executeQuery".equals(name)) return statusResultSet(rows);
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static ResultSet statusResultSet(List<List<Object>> rows) {
+        int[] index = {-1};
+        return proxy(ResultSet.class, (method, args) -> {
+            String name = method.getName();
+            if ("next".equals(name)) {
+                index[0] += 1;
+                return index[0] < rows.size();
+            }
+            if ("getString".equals(name)) {
+                String column = String.valueOf(args[0]).toUpperCase();
+                int columnIndex = switch (column) {
+                    case "OWNER" -> 0;
+                    case "OBJECT_NAME" -> 1;
+                    case "OBJECT_TYPE" -> 2;
+                    case "STATUS" -> 3;
+                    default -> -1;
+                };
+                return columnIndex < 0 ? null : String.valueOf(rows.get(index[0]).get(columnIndex));
+            }
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static Connection metadataConnectionWithIndexes(List<String> sqls) {
