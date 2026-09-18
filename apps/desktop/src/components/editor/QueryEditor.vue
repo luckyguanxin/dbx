@@ -153,6 +153,8 @@ import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { copySqlAsRichText } from "@/lib/sql/sqlRichText";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
+import { isPanelResizing } from "@/lib/app/panelResizeState";
+import { uiTuning } from "@/lib/app/uiTuning";
 import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } from "@/lib/editor/queryEditorSqlShortcut";
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
@@ -163,7 +165,8 @@ import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
-import { enabledSqlShortcutActions, resolveSqlShortcutTemplate } from "@/lib/sql/sqlShortcutActions";
+import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, resolveSqlShortcutForDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
+import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
@@ -194,6 +197,7 @@ import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMeta
 import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { analyzeIntentionActions, prepareExpandWildcardContext, buildExpandWildcardReplacement, type IntentionAction } from "@/lib/editor/sqlIntentionActions";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, queryTableNavigationTargetAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
@@ -296,6 +300,90 @@ const emit = defineEmits<{
 }>();
 
 const editorRef = ref<HTMLDivElement>();
+
+// While any panel divider is dragged, CodeMirror re-wraps and re-measures
+// every visible line on every frame the editor box changes — with a 100+ line
+// script that is the dominant drag cost (profiler: 2k+ measure() calls with
+// getBoundingClientRect in a 3s drag). We pin the editor root to an explicit
+// pixel size and then step-update that pin at most every TRACK_EVERY_FRAMES
+// animation frames (~30fps), which keeps the editor visually following the
+// divider while cutting the relayout frequency (and the layout thrash from
+// interleaved reads/writes) by half or more. The step interval is tunable via
+// ~/.dbx/ui-tuning.json (panelResizeTrackEveryFrames). The pin is released
+// once on pointer-up for one final exact layout.
+let frozenEditorBox: { width: number; height: number } | null = null;
+let editorTrackFrameId = 0;
+let editorTrackFrameCount = 0;
+
+function editorAvailableSize(): { width: number; height: number } | null {
+  const host = editorRef.value?.parentElement;
+  if (!host) return null;
+  const width = host.clientWidth;
+  const height = host.clientHeight;
+  if (width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+function pinEditorBox(size: { width: number; height: number }) {
+  const root = editorRef.value;
+  if (!root) return;
+  frozenEditorBox = size;
+  root.style.width = `${Math.round(size.width)}px`;
+  root.style.height = `${Math.round(size.height)}px`;
+  root.style.maxWidth = "none";
+  root.style.minHeight = "0";
+}
+
+function releaseEditorBox() {
+  const root = editorRef.value;
+  frozenEditorBox = null;
+  if (!root) return;
+  root.style.width = "";
+  root.style.height = "";
+  root.style.maxWidth = "";
+  root.style.minHeight = "";
+}
+
+function stopEditorBoxTracking() {
+  if (editorTrackFrameId) {
+    cancelAnimationFrame(editorTrackFrameId);
+    editorTrackFrameId = 0;
+  }
+  editorTrackFrameCount = 0;
+}
+
+function editorBoxTrackStep() {
+  editorTrackFrameId = requestAnimationFrame(editorBoxTrackStep);
+  if (++editorTrackFrameCount < uiTuning.value.panelResizeTrackEveryFrames) return;
+  editorTrackFrameCount = 0;
+  const next = editorAvailableSize();
+  if (!next || !frozenEditorBox) return;
+  if (Math.round(next.width) === Math.round(frozenEditorBox.width) && Math.round(next.height) === Math.round(frozenEditorBox.height)) return;
+  // Writing the pin keeps the editor a fixed-size box: the parent's layout is
+  // reflowed (cheap, the editor subtree is `contain`ed and skipped) but
+  // CodeMirror only observes one discrete size change per step.
+  pinEditorBox(next);
+}
+
+watch(
+  isPanelResizing,
+  (resizing) => {
+    const root = editorRef.value;
+    if (!root) return;
+    if (resizing) {
+      if (frozenEditorBox) return;
+      const size = editorAvailableSize();
+      if (!size) return;
+      pinEditorBox(size);
+      editorTrackFrameId = requestAnimationFrame(editorBoxTrackStep);
+    } else {
+      stopEditorBoxTracking();
+      if (frozenEditorBox) releaseEditorBox();
+    }
+  },
+  { flush: "sync" },
+);
+onBeforeUnmount(stopEditorBoxTracking);
 const view = shallowRef<EditorViewType | null>(null);
 const contextMenuOpen = ref(false);
 let contextMenuPointerCleanup: (() => void) | null = null;
@@ -2302,13 +2390,21 @@ function handleSqlIntentionActions(currentView: EditorViewType): boolean {
 }
 
 function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutActions>[number], currentView: EditorViewType, event?: KeyboardEvent): boolean {
+  // Non-SQL editors (Redis / Mongo / ES / …) keep their own command languages; do not inject SELECT templates.
+  if (queryEditorSelectionLanguage() !== "sql") return false;
   if (shouldBlockExecutionShortcut(event, currentView)) return true;
   if (props.readOnly) return true;
-  const { from, to, empty } = currentView.state.selection.main;
-  if (empty) return false;
-  const selected = currentView.state.sliceDoc(from, to).trim();
+  const { from, to, empty, head } = currentView.state.selection.main;
+  let selected: string | null = null;
+  if (!empty) {
+    selected = currentView.state.sliceDoc(from, to).trim() || null;
+  } else {
+    const line = currentView.state.doc.lineAt(head);
+    const localHead = Math.min(Math.max(0, head - line.from), line.text.length);
+    selected = resolveSqlShortcutTableToken(line.text, { from: localHead, to: localHead, empty: true, head: localHead });
+  }
   if (!selected) return false;
-  const sql = resolveSqlShortcutTemplate(action.sql, selected);
+  const sql = buildSqlShortcutExecutionSql(action, selected, props.databaseType);
   emitExecutionRequest(sql);
   return true;
 }
@@ -2345,11 +2441,27 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
     isReadOnly: () => !!props.readOnly,
   });
   const sqlShortcutActions = enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts);
-  const sqlShortcutKeymapActions = sqlShortcutActions.filter((action) => !isCharacterProducingShortcut(action.shortcut));
-  const sqlShortcutBindings = sqlShortcutKeymapActions.flatMap((action) => binding(action.shortcut, (currentView) => runSqlShortcutAction(action, currentView)));
+  const sqlShortcutKeymapBindings = uniqueSqlShortcutBindings(sqlShortcutActions).filter((shortcut) => !isCharacterProducingShortcut(shortcut));
+  // Do not set preventDefault: true — when run returns false (wrong DB scope / no table token),
+  // CodeMirror must not swallow the browser default. Returning true still prevents default.
+  const sqlShortcutBindings = sqlShortcutKeymapBindings.flatMap((shortcut) =>
+    shortcut
+      ? [
+          {
+            key: shortcutToCodeMirrorKey(shortcut),
+            run: (currentView: EditorViewType) => {
+              const action = resolveSqlShortcutForDatabase(settingsStore.editorSettings.sqlShortcuts, shortcut, props.databaseType);
+              if (!action) return false;
+              return runSqlShortcutAction(action, currentView);
+            },
+          },
+        ]
+      : [],
+  );
   const sqlShortcutDomHandler = createQueryEditorSqlShortcutDomHandler(
     () => settingsStore.editorSettings.sqlShortcuts,
     (action, currentView, event) => runSqlShortcutAction(action, currentView, event),
+    () => props.databaseType,
   );
   const combinedDomKeydownHandler = (event: KeyboardEvent, view: EditorViewType) => {
     if (replaceShortcutHandler(event)) return true;
@@ -3286,7 +3398,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       // views. Hover only removes PostgreSQL's appended access-control tail.
       try {
         const { ddl } = await loadObjectDdl(objectMetadataRequest);
-        const rawDdl = ddlForHoverPreview(ddl);
+        const rawDdl = ddlForHoverPreview(applyDdlStoragePreference(ddl, props.databaseType, settingsStore.editorSettings.excludeDdlStorage));
         if (rawDdl && rawDdl.trim()) {
           // A view's display DDL wraps the raw (often single-line) view source
           // in `CREATE ... VIEW ... AS`; the table-oriented reformatter cannot

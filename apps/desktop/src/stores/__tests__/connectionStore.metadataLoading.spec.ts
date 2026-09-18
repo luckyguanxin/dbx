@@ -2999,7 +2999,7 @@ describe("connectionStore metadata loading", () => {
 
     const loadPromise = store.loadTables(connection.id, "prulife", "xtdpcky", { force: true });
     await vi.waitFor(() => expect(saveSchemaCache).toHaveBeenCalledTimes(1));
-    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v9-informix-owner-v2`);
+    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v8-informix-owner-v2`);
     expect(schemaNode.isLoading).toBe(true);
 
     schemaNode.isExpanded = false;
