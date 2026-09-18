@@ -212,8 +212,14 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
 type SearchableBrowserHandle = {
   focusSearch: (target?: Element | null) => boolean;
   refresh?: () => boolean;
+  matchesRefreshScope?: (scope: ObjectBrowserRefreshScope) => boolean;
   insertCommand?: (command: string) => Promise<boolean>;
   executeCommand?: (command: string) => Promise<boolean>;
+};
+
+type ObjectBrowserRefreshScope = {
+  schema?: string;
+  catalog?: string;
 };
 
 type ElasticsearchJsonResponsePanelHandle = {
@@ -1034,30 +1040,19 @@ function onRefreshActiveKvBrowser(event: Event) {
   void nextTick(() => refreshData());
 }
 
+function matchesActiveObjectBrowserRefreshScope(detail: { connectionId?: string; database?: string } & ObjectBrowserRefreshScope): boolean {
+  if (props.activeTab.mode !== "objects" || props.activeTab.connectionId !== detail.connectionId || props.activeTab.database !== detail.database) return false;
+  const matchesRefreshScope = objectBrowserRef.value?.matchesRefreshScope;
+  if (matchesRefreshScope) return matchesRefreshScope(detail);
+  const objectBrowser = props.activeTab.objectBrowser;
+  return (objectBrowser?.schema || props.activeTab.schema || "") === (detail.schema || "") && (objectBrowser?.catalog || props.activeTab.catalog || "") === (detail.catalog || "");
+}
+
 function onRefreshObjectBrowser(event: Event) {
   const detail = (event as CustomEvent<{ connectionId?: string; database?: string; schema?: string; catalog?: string }>).detail;
-  const objectBrowser = props.activeTab.objectBrowser;
-  if (
-    !detail ||
-    props.activeTab.mode !== "objects" ||
-    props.activeTab.connectionId !== detail.connectionId ||
-    props.activeTab.database !== detail.database ||
-    (objectBrowser?.schema || props.activeTab.schema || "") !== (detail.schema || "") ||
-    (objectBrowser?.catalog || props.activeTab.catalog || "") !== (detail.catalog || "")
-  ) {
-    return;
-  }
+  if (!detail || !matchesActiveObjectBrowserRefreshScope(detail)) return;
   void nextTick(() => {
-    const currentObjectBrowser = props.activeTab.objectBrowser;
-    if (
-      props.activeTab.mode === "objects" &&
-      props.activeTab.connectionId === detail.connectionId &&
-      props.activeTab.database === detail.database &&
-      (currentObjectBrowser?.schema || props.activeTab.schema || "") === (detail.schema || "") &&
-      (currentObjectBrowser?.catalog || props.activeTab.catalog || "") === (detail.catalog || "")
-    ) {
-      refreshData();
-    }
+    if (matchesActiveObjectBrowserRefreshScope(detail)) refreshData();
   });
 }
 
