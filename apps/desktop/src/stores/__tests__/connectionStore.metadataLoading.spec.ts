@@ -848,7 +848,7 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("keeps concurrent table-tree and local-index refreshes in separate cache entries", async () => {
-    const treeCacheKey = "pg-1:app:public:group-tables:objects-v9";
+    const treeCacheKey = "pg-1:app:public:group-tables:objects-v8";
     const indexCacheKey = `${treeCacheKey}:table-search-index-v1`;
     const cachedPayloads = new Map<string, unknown>([
       [
