@@ -268,6 +268,7 @@ onMounted(() => {
   // The watcher below warms the grid for query/data tabs. Keep source-only
   // tabs out of that path: loading the grid there caused freezes (#8103).
   window.addEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+  window.addEventListener("dbx-refresh-object-browser", onRefreshObjectBrowser);
   window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.addEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
@@ -767,6 +768,7 @@ onUnmounted(() => {
   stopRunningElapsedTimer();
   standaloneResultToolbarResizeObserver?.disconnect();
   window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+  window.removeEventListener("dbx-refresh-object-browser", onRefreshObjectBrowser);
   window.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.visualViewport?.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.removeEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
@@ -1030,6 +1032,33 @@ function onRefreshActiveKvBrowser(event: Event) {
   const detail = (event as CustomEvent<{ mode?: string; connectionId?: string }>).detail;
   if (!detail || props.activeTab.mode !== detail.mode || props.activeTab.connectionId !== detail.connectionId) return;
   void nextTick(() => refreshData());
+}
+
+function onRefreshObjectBrowser(event: Event) {
+  const detail = (event as CustomEvent<{ connectionId?: string; database?: string; schema?: string; catalog?: string }>).detail;
+  const objectBrowser = props.activeTab.objectBrowser;
+  if (
+    !detail ||
+    props.activeTab.mode !== "objects" ||
+    props.activeTab.connectionId !== detail.connectionId ||
+    props.activeTab.database !== detail.database ||
+    (objectBrowser?.schema || props.activeTab.schema || "") !== (detail.schema || "") ||
+    (objectBrowser?.catalog || props.activeTab.catalog || "") !== (detail.catalog || "")
+  ) {
+    return;
+  }
+  void nextTick(() => {
+    const currentObjectBrowser = props.activeTab.objectBrowser;
+    if (
+      props.activeTab.mode === "objects" &&
+      props.activeTab.connectionId === detail.connectionId &&
+      props.activeTab.database === detail.database &&
+      (currentObjectBrowser?.schema || props.activeTab.schema || "") === (detail.schema || "") &&
+      (currentObjectBrowser?.catalog || props.activeTab.catalog || "") === (detail.catalog || "")
+    ) {
+      refreshData();
+    }
+  });
 }
 
 function openPluginResultView(pluginId: string, contributionId: string, label: string) {
